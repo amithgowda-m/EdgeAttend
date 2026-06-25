@@ -8,7 +8,6 @@ const char* ssid = "YOUR_WIFI_SSID";
 const char* password = "YOUR_WIFI_PASSWORD";
 
 // ─── CLOUD CONFIGURATION ─────────────────────────────────────────
-// FIXED: Using IPv4 fallback to bypass Android hotspot restrictions
 const char* mqtt_broker = "www.mqtt-dashboard.com"; 
 const uint16_t mqtt_port = 1883;
 
@@ -83,8 +82,9 @@ esp_err_t stream_handler(httpd_req_t *req) {
     }
     
     if(res != ESP_OK){ break; }
-
-    delay(50); 
+    
+    // [FIX APPLIED]: delay(50) removed entirely. The camera hardware naturally limits 
+    // the loop speed based on sensor readout. Adding delays causes massive HTTP buffer lag.
   }
   return res;
 }
@@ -132,7 +132,6 @@ void connectMQTT() {
     
     if (mqtt.connect(clientId.c_str())) {
       Serial.println(" Connected!");
-      // FIXED: Aligned with omnisense/ root topic
       mqtt.publish("omnisense/status", "{\"device\":\"esp32-cam\", \"status\":\"online\", \"version\":\"3.2\"}");
     } else {
       Serial.print(" failed, rc=");
@@ -173,11 +172,12 @@ void setup() {
   
   if(psramFound()){
     config.frame_size = FRAMESIZE_VGA;  
-    config.jpeg_quality = 15; 
+    // [FIX APPLIED]: Lowered JPEG Quality from 15 to 10 for crisper images.
+    config.jpeg_quality = 10; 
     config.fb_count = 2;
   } else {
     config.frame_size = FRAMESIZE_CIF;
-    config.jpeg_quality = 15;
+    config.jpeg_quality = 10;
     config.fb_count = 1;
   }
 
@@ -187,6 +187,10 @@ void setup() {
   }
 
   WiFi.begin(ssid, password);
+  
+  // [FIX APPLIED]: Disable Wi-Fi sleep to prevent stream stuttering
+  WiFi.setSleep(false); 
+
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
@@ -209,7 +213,6 @@ void loop() {
   if (!mqtt.connected()) connectMQTT();
   mqtt.loop();
 
-  // FIXED: Aligned with omnisense/ root topic
   if (millis() - lastMqttHeartbeat > 10000) {
     mqtt.publish("omnisense/health", "{\"device\": \"esp32-cam\", \"status\": \"active\"}");
     lastMqttHeartbeat = millis();

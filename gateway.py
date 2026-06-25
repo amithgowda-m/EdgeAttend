@@ -18,12 +18,11 @@ from insightface.app import FaceAnalysis
 import faiss
 
 # ─── CONFIGURATION ────────────────────────────────────────────────────────────
-ESP32_IP        = "10.52.144.133"          
+ESP32_IP        = "10.95.187.9"          
 ESP32_BASE_URL  = f"http://{ESP32_IP}"
 ESP32_STREAM    = f"{ESP32_BASE_URL}/"     
 ESP32_SNAP      = f"{ESP32_BASE_URL}/snap" 
 
-# Match the server name used by the ESP32 code exactly
 MQTT_BROKER     = "www.mqtt-dashboard.com"
 MQTT_PORT       = 1883
 DATASET_FOLDER  = "dataset"
@@ -78,7 +77,8 @@ _system_status = "AWAITING STREAM"
 # ─── AI INIT ──────────────────────────────────────────────────────────────────
 print("[BOOT] Initializing OmniSense v3.2 …")
 face_app = FaceAnalysis(name='buffalo_l')
-face_app.prepare(ctx_id=-1, det_size=(640, 640))
+# FIX: Reduced det_size from (640,640) to (320,320) — halves AI processing time per frame
+face_app.prepare(ctx_id=-1, det_size=(320, 320))
 
 faiss_index = faiss.IndexFlatL2(512)
 student_dir: list[str] = []
@@ -147,18 +147,30 @@ def _snapshot_check() -> bool:
 def _fetch_opencv(url: str) -> bool:
     global _stream_active, _system_status
     cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+    # FIX: Minimal internal buffer to prevent frame queue buildup (the main lag source)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+    cap.set(cv2.CAP_PROP_FPS, 20)
+    cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 3000)
+
     if not cap.isOpened():
         cap.release()
         return False
+
     _stream_active = True
     _system_status = "LIVE — OPENCV"
+
     while not _stop.is_set():
-        ok, frame = cap.read()
+        # FIX: Drain the internal decode buffer — grab() without decode, then
+        # retrieve() only the freshest frame. Eliminates accumulated-frame lag.
+        cap.grab()
+        cap.grab()
+        ok, frame = cap.retrieve()
         if not ok:
             break
         _write_frame(frame)
+        # No sleep here — grab() acts as the natural pacemaker
+
     cap.release()
     return True
 
@@ -186,15 +198,18 @@ def _fetch_urllib(url: str) -> bool:
             boundary_marker = b"--" + MJPEG_BOUNDARY
             parts = buf.split(boundary_marker)
             if len(parts) > 1:
+                # FIX: Skip all but the LAST part to avoid processing stale frames
+                last_valid = None
                 for part in parts[:-1]:
                     soi = part.find(b'\xff\xd8')
                     eoi = part.rfind(b'\xff\xd9')
                     if soi != -1 and eoi != -1 and eoi > soi:
-                        jpg   = part[soi:eoi+2]
-                        frame = cv2.imdecode(np.frombuffer(jpg, dtype=np.uint8), cv2.IMREAD_COLOR)
-                        if frame is not None:
-                            _write_frame(frame)
-                buf = parts[-1] 
+                        last_valid = part[soi:eoi+2]
+                if last_valid is not None:
+                    frame = cv2.imdecode(np.frombuffer(last_valid, dtype=np.uint8), cv2.IMREAD_COLOR)
+                    if frame is not None:
+                        _write_frame(frame)
+                buf = parts[-1]
                 continue
 
             soi = buf.find(b'\xff\xd8')
@@ -208,6 +223,7 @@ def _fetch_urllib(url: str) -> bool:
     except Exception as e:
         pass
     return True 
+# Replace this specific function inside your gateway.py file
 
 def fetch_stream():
     global _stream_active, _system_status
@@ -218,7 +234,11 @@ def fetch_stream():
     while not _stop.is_set():
         _stream_active = False
         _system_status = "RECONNECTING …"
-        connected = _fetch_opencv(ESP32_STREAM) or _fetch_urllib(ESP32_STREAM)
+        
+        # [FIX APPLIED]: Priority swapped. _fetch_urllib is significantly faster 
+        # for MJPEG streams because it avoids OpenCV's internal FFMPEG buffer queue.
+        connected = _fetch_urllib(ESP32_STREAM) or _fetch_opencv(ESP32_STREAM)
+        
         _stream_active = False
         if not connected:
             _system_status = f"OFFLINE — retry {int(delay)}s"
@@ -263,28 +283,20 @@ def ai_worker():
                     if now - _cooldown[label] > COOLDOWN_SECS:
                         _cooldown[label] = now
                         log_attendance(label)
-                        
-                        # Standardizing all topics under omnisense/ root folder
                         _mqtt_queue.put_nowait(("omnisense/attendance", {
                             "type": "auth", "userId": label,
                             "epoch": int(now), "action": "grant_access"
                         }))
-                        
-                        # Match the JSON format structural check of your Arduino code
                         _mqtt_queue.put_nowait(("omnisense/buzzer", {"state": "known"}))
-                        
                         print(f"[AUTH] ✅  {label} — logged & webhooks queued.")
                 else:
                     if now - _cooldown["__unknown__"] > UNKNOWN_COOLDOWN:
                         _cooldown["__unknown__"] = now
-                        
                         _mqtt_queue.put_nowait(("omnisense/security", {
                             "type": "alert", "level": "critical",
                             "reason": "unrecognized_entity", "epoch": int(now)
                         }))
-                        
                         _mqtt_queue.put_nowait(("omnisense/buzzer", {"state": "unknown"}))
-                        
                         print("[SECURITY] ⚠️  Unknown entity detected.")
 
             ents.append({"box": box, "label": label, "color": color})
@@ -309,8 +321,6 @@ def mqtt_worker():
             client.loop_start()
             delay = 1.0
             print("[MQTT] Connected.")
-            
-            # Send initial Python Gateway status message
             client.publish("omnisense/gateway/status", "{\"device\":\"python_gateway\",\"status\":\"online\"}")
             
             while not _stop.is_set():
