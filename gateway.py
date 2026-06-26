@@ -189,6 +189,19 @@ def fetch_room_stream(room_name: str, ip: str):
             _camera_statuses[room_name] = "Connection Lost"
             time.sleep(2.0)
 
+def fetch_tof_status(room_name: str, node_url: str):
+    """Continuously polls the ESP32 ToF hardware node for real-time occupancy."""
+    while not _stop.is_set():
+        try:
+            resp = requests.get(f"{node_url}/status", timeout=2.0)
+            if resp.status_code == 200:
+                data = resp.json()
+                _room_occupancies[room_name] = data.get("occupancy", 0)
+        except Exception:
+            pass
+        time.sleep(1.0)
+
+
 # ─── FLEET AI PROCESSING PIPELINE ─────────────────────────────────────────────
 def ai_processing_core():
     while not _stop.is_set():
@@ -257,7 +270,8 @@ def ai_processing_core():
                                 continue
                         unknown_present = True
 
-                _room_occupancies[room_name] = len(room_presence)
+                # ToF sensor now handles real-time occupancy counting natively
+                # _room_occupancies[room_name] = len(room_presence)
 
             if unknown_present and not frame_has_known:
                 if now - _unknown_cooldowns[room_name] > 10.0:
@@ -628,6 +642,8 @@ class OmniSenseGUI(tk.Tk):
         # Spin up threads mapping to each unique workspace context
         for room, data in config["CLASSROOM_FLEET"].items():
             threading.Thread(target=fetch_room_stream, args=(room, data["CAMERA_IP"]), daemon=True).start()
+            if "MAIN_NODE_URL" in data:
+                threading.Thread(target=fetch_tof_status, args=(room, data["MAIN_NODE_URL"]), daemon=True).start()
             
         threading.Thread(target=ai_processing_core, daemon=True).start()
         self.status_lbl.config(text="System Control Status: ACTIVE RUNTIME", foreground="green")
