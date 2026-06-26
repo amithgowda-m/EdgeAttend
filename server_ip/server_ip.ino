@@ -3,15 +3,13 @@
 #include <PubSubClient.h>
 #include "esp_http_server.h"
 
-// ─── NETWORK CREDENTIALS ─────────────────────────────────────────
 const char* ssid = "YOUR_WIFI_SSID";
 const char* password = "YOUR_WIFI_PASSWORD";
 
-// ─── CLOUD CONFIGURATION ─────────────────────────────────────────
+
 const char* mqtt_broker = "www.mqtt-dashboard.com"; 
 const uint16_t mqtt_port = 1883;
 
-// ─── HARDWARE PIN CONFIGURATION (AI-THINKER) ─────────────────────
 #define PWDN_GPIO_NUM     32
 #define RESET_GPIO_NUM    -1
 #define XCLK_GPIO_NUM      0
@@ -35,7 +33,6 @@ httpd_handle_t camera_httpd = NULL;
 
 unsigned long lastMqttHeartbeat = 0;
 
-// ─── HTTP ENDPOINT 1: THE MJPEG VIDEO STREAM (/) ─────────────────
 #define PART_BOUNDARY "frame"
 static const char* _STREAM_CONTENT_TYPE = "multipart/x-mixed-replace;boundary=" PART_BOUNDARY;
 static const char* _STREAM_BOUNDARY = "\r\n--" PART_BOUNDARY "\r\n";
@@ -83,13 +80,12 @@ esp_err_t stream_handler(httpd_req_t *req) {
     
     if(res != ESP_OK){ break; }
     
-    // [FIX APPLIED]: delay(50) removed entirely. The camera hardware naturally limits 
-    // the loop speed based on sensor readout. Adding delays causes massive HTTP buffer lag.
+
   }
   return res;
 }
 
-// ─── HTTP ENDPOINT 2: THE HEALTH SNAPSHOT (/snap) ────────────────
+
 esp_err_t snap_handler(httpd_req_t *req) {
   camera_fb_t * fb = esp_camera_fb_get();
   if (!fb) {
@@ -108,7 +104,7 @@ esp_err_t snap_handler(httpd_req_t *req) {
   return res;
 }
 
-// ─── SERVER INITIALIZATION ───────────────────────────────────────
+
 void startCameraServer(){
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.server_port = 80;
@@ -123,7 +119,7 @@ void startCameraServer(){
   }
 }
 
-// ─── MQTT CLOUD CONNECTION ───────────────────────────────────────
+
 void connectMQTT() {
   while (!mqtt.connected()) {
     Serial.print("[MQTT] Attempting connection to HiveMQ...");
@@ -142,7 +138,7 @@ void connectMQTT() {
   }
 }
 
-// ─── MAIN SETUP & LOOP ───────────────────────────────────────────
+
 void setup() {
   Serial.begin(115200);
   delay(1000);
@@ -172,7 +168,7 @@ void setup() {
   
   if(psramFound()){
     config.frame_size = FRAMESIZE_VGA;  
-    // [FIX APPLIED]: Lowered JPEG Quality from 15 to 10 for crisper images.
+
     config.jpeg_quality = 10; 
     config.fb_count = 2;
   } else {
@@ -188,7 +184,7 @@ void setup() {
 
   WiFi.begin(ssid, password);
   
-  // [FIX APPLIED]: Disable Wi-Fi sleep to prevent stream stuttering
+
   WiFi.setSleep(false); 
 
   while (WiFi.status() != WL_CONNECTED) {
