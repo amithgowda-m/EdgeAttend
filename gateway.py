@@ -73,6 +73,7 @@ _stop.set()
 _room_queues = {}          # Maps room_name -> queue.Queue(maxsize=1)
 _camera_statuses = {}      # Maps room_name -> string status
 _room_occupancies = {}     # Maps room_name -> active student count
+_latest_frames = {}        # Maps room_name -> latest cv2 frame
 
 _presence_lock = threading.Lock()
 _active_presence = defaultdict(dict)  # Maps room_name -> {student_name: timestamp}
@@ -174,14 +175,17 @@ def fetch_room_stream(room_name: str, ip: str):
                             last_valid = part[soi:eoi+2]
                     if last_valid is not None:
                         frame = cv2.imdecode(np.frombuffer(last_valid, dtype=np.uint8), cv2.IMREAD_COLOR)
-                        if frame is not None and room_name in _room_queues:
-                            q = _room_queues[room_name]
-                            if q.full():
-                                try: q.get_nowait()
-                                except queue.Empty: pass
-                            q.put(frame)
+                        if frame is not None:
+                            _latest_frames[room_name] = frame
+                            if room_name in _room_queues:
+                                q = _room_queues[room_name]
+                                if q.full():
+                                    try: q.get_nowait()
+                                    except queue.Empty: pass
+                                q.put(frame)
                     buf = parts[-1]
-        except Exception:
+        except Exception as e:
+            print(f"Stream error for {room_name} at {ip}: {e}")
             _camera_statuses[room_name] = "Connection Lost"
             time.sleep(2.0)
 
@@ -326,13 +330,7 @@ class CameraViewerWindow(tk.Toplevel):
         self._running = True
         self._current_photo = None   # keep reference to avoid GC
         
-        # ── Start independent fetch thread ───────────────────────────────
-        self._thread = threading.Thread(target=self._stream_worker, daemon=True)
-        self._thread.start()
-        
         # ── Poll for new frames on the Tk main thread ────────────────────
-        self._pending_frame = None
-        self._pending_lock = threading.Lock()
         self._schedule_ui_update()
         
         self.protocol("WM_DELETE_WINDOW", self.close_viewer)
@@ -359,63 +357,17 @@ class CameraViewerWindow(tk.Toplevel):
         except tk.TclError:
             pass
     
-    # ── Background stream thread ─────────────────────────────────────────────
-    
-    def _stream_worker(self):
-        """Fetches MJPEG frames in a dedicated thread. Totally separate
-        from the AI-pipeline queues — camera sees two client connections."""
-        import urllib.error
-        
-        while self._running:
-            try:
-                self._set_status("◉  Connecting…", "#f6c90e")
-                req = urllib.request.urlopen(self.stream_url, timeout=8)
-                self._set_status("◉  LIVE", "#48bb78")
-                buf = b""
-                
-                while self._running:
-                    chunk = req.read(8192)
-                    if not chunk:
-                        break
-                    buf += chunk
-                    if len(buf) > 2_097_152:   # 2 MB safety cap
-                        buf = b""
-                        continue
-                    
-                    parts = buf.split(b"--frame")
-                    if len(parts) > 1:
-                        last_valid = None
-                        for part in parts[:-1]:
-                            soi = part.find(b'\xff\xd8')
-                            eoi = part.rfind(b'\xff\xd9')
-                            if soi != -1 and eoi != -1 and eoi > soi:
-                                last_valid = part[soi:eoi+2]
-                        if last_valid is not None:
-                            frame = cv2.imdecode(
-                                np.frombuffer(last_valid, dtype=np.uint8),
-                                cv2.IMREAD_COLOR
-                            )
-                            if frame is not None:
-                                with self._pending_lock:
-                                    self._pending_frame = frame
-                        buf = parts[-1]
-                        
-            except (urllib.error.URLError, OSError, Exception):
-                self._set_status("◉  Connection Lost — Retrying…", "#fc8181")
-                if self._running:
-                    time.sleep(3.0)
-    
     # ── Tk-thread frame renderer ─────────────────────────────────────────────
     
     def _schedule_ui_update(self):
         if not self._running:
             return
         
-        with self._pending_lock:
-            frame = self._pending_frame
-            self._pending_frame = None
+        # Read the latest frame fetched by the AI worker's HTTP connection
+        frame = _latest_frames.get(self.room_name)
         
         if frame is not None:
+            self._set_status("◉  LIVE", "#48bb78")
             try:
                 # Remove placeholder once real frames arrive
                 self.canvas.delete("placeholder")
@@ -689,8 +641,8 @@ class OmniSenseGUI(tk.Tk):
 
 if __name__ == "__main__":
     # Ensure background system redirects standard console handles invisibly
-    sys.stdout = open(os.devnull, 'w')
-    sys.stderr = open(os.devnull, 'w')
+    # sys.stdout = open(os.devnull, 'w')
+    # sys.stderr = open(os.devnull, 'w')
     
     app = OmniSenseGUI()
     app.mainloop()
