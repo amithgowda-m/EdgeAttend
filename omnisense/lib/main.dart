@@ -1,5 +1,6 @@
 // lib/main.dart
 import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -12,10 +13,19 @@ import 'package:omnisense/features/registry/presentation/registry_screen.dart';
 import 'package:omnisense/firebase_options.dart';
 import 'package:omnisense/shared/services/fcm_service.dart';
 
+/// Mandatory Top-Level Background Message Handler for Firebase Cloud Messaging.
+/// This must remain a top-level function to execute safely in an isolated background thread.
+@pragma('vm:entry-point')
+Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
+  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  // Custom processing logic for your "Unknown Entity" alarms can be executed here
+}
+
 void main() async {
+  // Ensure the framework engine is fully attached before running native calls
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Force portrait + landscape for tablet support
+  // Enforce structural orientation optimization for hardware displays and tablets
   await SystemChrome.setPreferredOrientations([
     DeviceOrientation.portraitUp,
     DeviceOrientation.portraitDown,
@@ -23,23 +33,29 @@ void main() async {
     DeviceOrientation.landscapeRight,
   ]);
 
-  // System UI overlay style — dark transparent status bar
+  // Apply visual layer optimizations across system status navigation interfaces
   SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
-    statusBarColor:            Colors.transparent,
-    statusBarIconBrightness:   Brightness.light,
-    systemNavigationBarColor:  OmniColors.bgDeep,
+    statusBarColor: Colors.transparent,
+    statusBarIconBrightness: Brightness.light,
+    systemNavigationBarColor: OmniColors.bgDeep,
     systemNavigationBarIconBrightness: Brightness.light,
   ));
 
-  // Initialize Firebase
-  // TODO: Fill in real values in firebase_options.dart before running.
-  await Firebase.initializeApp(
-    options: DefaultFirebaseOptions.currentPlatform,
-  );
+  try {
+    // Initialize the main Firebase instance using your generated configuration map
+    await Firebase.initializeApp(
+      options: DefaultFirebaseOptions.currentPlatform,
+    );
 
-  // Initialize FCM service
-  final fcmService = FcmService();
-  await fcmService.initialize();
+    // Register background cloud messaging channels
+    FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
+
+    // Bootstrap local notification routines and channels
+    final fcmService = FcmService();
+    await fcmService.initialize();
+  } catch (error) {
+    debugPrint("Critical System Boot Failure: $error");
+  }
 
   runApp(
     const ProviderScope(
@@ -48,21 +64,21 @@ void main() async {
   );
 }
 
-// ─── Root App ─────────────────────────────────────────────────────────────────
+// ─── Root App Configuration ───────────────────────────────────────────────────
 class OmniSenseApp extends ConsumerWidget {
   const OmniSenseApp({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     return MaterialApp(
-      title:          'OmniSense Command Center',
+      title: 'OmniSense Command Center',
       debugShowCheckedModeBanner: false,
-      theme:          AppTheme.dark,
-      darkTheme:      AppTheme.dark,
-      themeMode:      ThemeMode.dark,
-      initialRoute:   '/',
+      theme: AppTheme.dark,
+      darkTheme: AppTheme.dark,
+      themeMode: ThemeMode.dark,
+      initialRoute: '/',
       onGenerateRoute: _onGenerateRoute,
-      home:           const _AuthGate(),
+      home: const _AuthGate(),
     );
   }
 
@@ -86,16 +102,16 @@ class OmniSenseApp extends ConsumerWidget {
       pageBuilder: (_, __, ___) => page,
       transitionsBuilder: (_, anim, __, child) => FadeTransition(
         opacity: anim,
-        child:   child,
+        child: child,
       ),
       transitionDuration: const Duration(milliseconds: 220),
     );
   }
 }
 
-// ─── Auth Gate ────────────────────────────────────────────────────────────────
-/// Listens to [authStateProvider] and routes to LoginScreen or DashboardScreen.
-/// This is the canonical pattern for Firebase Auth with Riverpod.
+// ─── Role-Based Authentication Gate ───────────────────────────────────────────
+/// Evaluates credentials and verifies explicit admin role clearances
+/// before rendering primary secure workspace dashboards.
 class _AuthGate extends ConsumerWidget {
   const _AuthGate();
 
@@ -105,18 +121,27 @@ class _AuthGate extends ConsumerWidget {
 
     return authAsync.when(
       data: (user) {
-        if (user != null) {
-          return const DashboardScreen();
+        if (user == null) {
+          return const LoginScreen();
         }
-        return const LoginScreen();
+        
+        // Secondary Role Verification Sequence
+        // Ensures standard accounts cannot bypass entry to the hardware panel
+        final adminAsync = ref.watch(adminRoleProvider);
+        
+        return adminAsync.when(
+          data: (isAdmin) => isAdmin ? const DashboardScreen() : const LoginScreen(),
+          loading: () => const _SplashScreen(),
+          error: (_, __) => const LoginScreen(),
+        );
       },
       loading: () => const _SplashScreen(),
-      error:   (_, __) => const LoginScreen(),
+      error: (_, __) => const LoginScreen(),
     );
   }
 }
 
-// ─── Splash Screen ─────────────────────────────────────────────────────────────
+// ─── Hardware Themed Splash Sequence ──────────────────────────────────────────
 class _SplashScreen extends StatelessWidget {
   const _SplashScreen();
 
@@ -129,7 +154,8 @@ class _SplashScreen extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             Container(
-              width: 72, height: 72,
+              width: 72,
+              height: 72,
               decoration: BoxDecoration(
                 border: Border.all(color: OmniColors.neonGreen, width: 1.5),
                 borderRadius: BorderRadius.circular(16),
@@ -148,12 +174,12 @@ class _SplashScreen extends StatelessWidget {
             ),
             const SizedBox(height: 16),
             const Text(
-              'INITIALIZING…',
+              'INITIALIZING APP LAYER…',
               style: TextStyle(
-                color:       OmniColors.textSecondary,
-                fontSize:    12,
+                color: OmniColors.textSecondary,
+                fontSize: 12,
                 letterSpacing: 3.0,
-                fontFamily:  'Rajdhani',
+                fontFamily: 'Rajdhani',
               ),
             ),
           ],

@@ -9,3 +9,5 @@ attendance_log.csv
 # Exclude images in dataset folder (the database)
 dataset/*
 !dataset/.gitkeep
+firebase_credentials.json
+

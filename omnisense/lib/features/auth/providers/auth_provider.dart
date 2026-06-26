@@ -1,4 +1,3 @@
-// lib/features/auth/providers/auth_provider.dart
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:omnisense/features/auth/data/auth_repository.dart';
@@ -17,6 +16,20 @@ final authStateProvider = StreamProvider<User?>((ref) {
 final isAuthenticatedProvider = Provider<bool>((ref) {
   final auth = ref.watch(authStateProvider);
   return auth.maybeWhen(data: (user) => user != null, orElse: () => false);
+});
+
+/// Evaluates if the current logged-in user has Admin privileges
+final adminRoleProvider = FutureProvider<bool>((ref) async {
+  final user = ref.watch(authStateProvider).value;
+  
+  // If nobody is logged in, they are not an admin
+  if (user == null) {
+    return false;
+  }
+  
+  // For your presentation MVP: We automatically assume anyone who 
+  // successfully logs in via your Firebase Authentication is an Admin.
+  return true;
 });
 
 /// Notifier to manage sign-in / sign-out actions with loading + error state.

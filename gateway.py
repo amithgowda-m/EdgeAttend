@@ -1,5 +1,5 @@
 """
-OmniSense Edge Gateway v3.2 (Synchronized Architecture)
+OmniSense Edge Gateway v3.2 (Synchronized Architecture + Firebase Cloud)
 """
 
 import cv2
@@ -17,6 +17,10 @@ from collections import defaultdict
 from insightface.app import FaceAnalysis
 import faiss
 
+# --- FIREBASE IMPORTS ---
+import firebase_admin
+from firebase_admin import credentials, firestore
+
 # ─── CONFIGURATION ────────────────────────────────────────────────────────────
 ESP32_IP        = "10.95.187.9"          
 ESP32_BASE_URL  = f"http://{ESP32_IP}"
@@ -27,6 +31,7 @@ MQTT_BROKER     = "www.mqtt-dashboard.com"
 MQTT_PORT       = 1883
 DATASET_FOLDER  = "dataset"
 ATTENDANCE_LOG  = "attendance_log.csv"
+FIREBASE_KEY    = "firebase_credentials.json" # Download from Firebase Console
 
 FAISS_THRESHOLD  = 1.45   
 COOLDOWN_SECS    = 30     
@@ -67,17 +72,34 @@ def _read_entities():
     with _entity_lock:
         return list(_entities)
 
-# ─── MQTT QUEUE ───────────────────────────────────────────────────────────────
+# ─── DATA QUEUES ──────────────────────────────────────────────────────────────
 _mqtt_queue: queue.Queue = queue.Queue(maxsize=64)
+_firebase_queue: queue.Queue = queue.Queue(maxsize=128) # New queue for cloud sync
 
 # ─── STREAM STATE ─────────────────────────────────────────────────────────────
 _stream_active = False
 _system_status = "AWAITING STREAM"
 
-# ─── AI INIT ──────────────────────────────────────────────────────────────────
+# ─── AI & FIREBASE INIT ───────────────────────────────────────────────────────
 print("[BOOT] Initializing OmniSense v3.2 …")
+
+# Initialize Firebase
+firebase_enabled = False
+db = None
+try:
+    if os.path.exists(FIREBASE_KEY):
+        cred = credentials.Certificate(FIREBASE_KEY)
+        firebase_admin.initialize_app(cred)
+        db = firestore.client()
+        firebase_enabled = True
+        print("[FIREBASE] ✅ Connected to Cloud Firestore")
+    else:
+        print(f"[FIREBASE] ⚠️ {FIREBASE_KEY} not found. Running in Local Mode only.")
+except Exception as e:
+    print(f"[FIREBASE] ❌ Error initializing: {e}")
+
+# Initialize AI
 face_app = FaceAnalysis(name='buffalo_l')
-# FIX: Reduced det_size from (640,640) to (320,320) — halves AI processing time per frame
 face_app.prepare(ctx_id=-1, det_size=(320, 320))
 
 faiss_index = faiss.IndexFlatL2(512)
@@ -92,15 +114,25 @@ def _lerp_box(prev, curr, alpha=LERP_ALPHA):
         return curr
     return [int(p + alpha * (c - p)) for p, c in zip(prev, curr)]
 
-
 def log_attendance(sid: str):
+    # 1. Log locally to CSV
     exists = os.path.isfile(ATTENDANCE_LOG)
     with open(ATTENDANCE_LOG, 'a', newline='') as f:
         w = csv.writer(f)
         if not exists:
             w.writerow(["Timestamp", "Student ID", "Status"])
         w.writerow([time.strftime("%Y-%m-%d %H:%M:%S"), sid, "Present"])
-
+    
+    # 2. Queue for Firebase sync
+    if firebase_enabled:
+        _firebase_queue.put_nowait({
+            "collection": "events",
+            "data": {
+                "entity_id": sid,
+                "status": "Present",
+                "timestamp": firestore.SERVER_TIMESTAMP
+            }
+        })
 
 def load_dataset():
     os.makedirs(DATASET_FOLDER, exist_ok=True)
@@ -129,7 +161,6 @@ def load_dataset():
         print(f"[ENROLL] ✅  {name}")
     return count
 
-
 def _snapshot_check() -> bool:
     try:
         resp = urllib.request.urlopen(ESP32_SNAP, timeout=4)
@@ -141,13 +172,11 @@ def _snapshot_check() -> bool:
         print(f"[HEALTH] Snapshot check failed: {e}")
         return False
 
-
 # ─── THREAD 1: STREAM FETCHER ─────────────────────────────────────────────────
 
 def _fetch_opencv(url: str) -> bool:
     global _stream_active, _system_status
     cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
-    # FIX: Minimal internal buffer to prevent frame queue buildup (the main lag source)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
     cap.set(cv2.CAP_PROP_FPS, 20)
@@ -161,15 +190,12 @@ def _fetch_opencv(url: str) -> bool:
     _system_status = "LIVE — OPENCV"
 
     while not _stop.is_set():
-        # FIX: Drain the internal decode buffer — grab() without decode, then
-        # retrieve() only the freshest frame. Eliminates accumulated-frame lag.
         cap.grab()
         cap.grab()
         ok, frame = cap.retrieve()
         if not ok:
             break
         _write_frame(frame)
-        # No sleep here — grab() acts as the natural pacemaker
 
     cap.release()
     return True
@@ -198,7 +224,6 @@ def _fetch_urllib(url: str) -> bool:
             boundary_marker = b"--" + MJPEG_BOUNDARY
             parts = buf.split(boundary_marker)
             if len(parts) > 1:
-                # FIX: Skip all but the LAST part to avoid processing stale frames
                 last_valid = None
                 for part in parts[:-1]:
                     soi = part.find(b'\xff\xd8')
@@ -223,7 +248,6 @@ def _fetch_urllib(url: str) -> bool:
     except Exception as e:
         pass
     return True 
-# Replace this specific function inside your gateway.py file
 
 def fetch_stream():
     global _stream_active, _system_status
@@ -235,8 +259,6 @@ def fetch_stream():
         _stream_active = False
         _system_status = "RECONNECTING …"
         
-        # [FIX APPLIED]: Priority swapped. _fetch_urllib is significantly faster 
-        # for MJPEG streams because it avoids OpenCV's internal FFMPEG buffer queue.
         connected = _fetch_urllib(ESP32_STREAM) or _fetch_opencv(ESP32_STREAM)
         
         _stream_active = False
@@ -282,7 +304,8 @@ def ai_worker():
                     color, label = (0, 200, 0), name
                     if now - _cooldown[label] > COOLDOWN_SECS:
                         _cooldown[label] = now
-                        log_attendance(label)
+                        log_attendance(label) # Logs to CSV and pushes to Firebase
+                        
                         _mqtt_queue.put_nowait(("omnisense/attendance", {
                             "type": "auth", "userId": label,
                             "epoch": int(now), "action": "grant_access"
@@ -292,12 +315,24 @@ def ai_worker():
                 else:
                     if now - _cooldown["__unknown__"] > UNKNOWN_COOLDOWN:
                         _cooldown["__unknown__"] = now
+                        
+                        # Sync unknown entity to Firebase for the Flutter Push Notification
+                        if firebase_enabled:
+                            _firebase_queue.put_nowait({
+                                "collection": "events",
+                                "data": {
+                                    "entity_id": "Unknown",
+                                    "status": "Unknown_Entity",
+                                    "timestamp": firestore.SERVER_TIMESTAMP
+                                }
+                            })
+
                         _mqtt_queue.put_nowait(("omnisense/security", {
                             "type": "alert", "level": "critical",
                             "reason": "unrecognized_entity", "epoch": int(now)
                         }))
                         _mqtt_queue.put_nowait(("omnisense/buzzer", {"state": "unknown"}))
-                        print("[SECURITY] ⚠️  Unknown entity detected.")
+                        print("[SECURITY] ⚠️  Unknown entity detected. Fired Alerts.")
 
             ents.append({"box": box, "label": label, "color": color})
 
@@ -307,7 +342,6 @@ def ai_worker():
         elapsed  = time.perf_counter() - t0
         interval = float(np.clip(elapsed * 1.5, AI_MIN_INTERVAL, AI_MAX_INTERVAL))
         time.sleep(interval)
-
 
 # ─── THREAD 3: MQTT WORKER ────────────────────────────────────────────────────
 
@@ -320,7 +354,7 @@ def mqtt_worker():
             client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
             client.loop_start()
             delay = 1.0
-            print("[MQTT] Connected.")
+            print("[MQTT] ✅ Connected.")
             client.publish("omnisense/gateway/status", "{\"device\":\"python_gateway\",\"status\":\"online\"}")
             
             while not _stop.is_set():
@@ -335,6 +369,28 @@ def mqtt_worker():
             _stop.wait(delay)
             delay = min(delay * 2, 32.0)
 
+# ─── THREAD 4: FIREBASE WORKER ────────────────────────────────────────────────
+def firebase_worker():
+    if not firebase_enabled:
+        return
+    
+    while not _stop.is_set():
+        try:
+            # Wait for data in the queue
+            payload = _firebase_queue.get(timeout=1.0)
+            
+            # Extract collection and document data
+            collection_name = payload["collection"]
+            doc_data = payload["data"]
+            
+            # Push to Cloud Firestore
+            db.collection(collection_name).add(doc_data)
+            print(f"[FIREBASE] ☁️  Synced {doc_data.get('status')} event to cloud.")
+            
+        except queue.Empty:
+            pass
+        except Exception as e:
+            print(f"[FIREBASE] ❌ Sync failed: {e}")
 
 # ─── MAIN: SMOOTH UI ──────────────────────────────────────────────────────────
 
@@ -412,6 +468,7 @@ if __name__ == "__main__":
     threading.Thread(target=fetch_stream, name="StreamFetcher", daemon=True).start()
     threading.Thread(target=ai_worker,    name="AIWorker",      daemon=True).start()
     threading.Thread(target=mqtt_worker,  name="MQTTWorker",    daemon=True).start()
+    threading.Thread(target=firebase_worker, name="FirebaseWorker", daemon=True).start()
 
     run_ui()
     print("[EXIT] Shutdown complete.")
