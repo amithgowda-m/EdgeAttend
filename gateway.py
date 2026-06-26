@@ -16,6 +16,7 @@ import queue
 import sys
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+from PIL import Image, ImageTk
 from collections import defaultdict
 from insightface.app import FaceAnalysis
 import faiss
@@ -262,6 +263,206 @@ def ai_processing_core():
 
         time.sleep(0.01)
 
+# ─── CAMERA VIEWER POPUP WINDOW ──────────────────────────────────────────────
+class CameraViewerWindow(tk.Toplevel):
+    """Standalone CCTV popup that independently streams from the camera IP.
+    Opens its own HTTP connection — does NOT touch _room_queues used by AI."""
+    
+    def __init__(self, parent, room_name: str, camera_ip: str):
+        super().__init__(parent)
+        self.room_name = room_name
+        self.camera_ip = camera_ip
+        self.stream_url = f"http://{camera_ip}/"
+        
+        self.title(f"📷  Live Feed — {room_name}  [{camera_ip}]")
+        self.geometry("700x560")
+        self.resizable(True, True)
+        self.configure(bg="#1a1a2e")
+        self.minsize(400, 360)
+        
+        # ── Header bar ──────────────────────────────────────────────────
+        header = tk.Frame(self, bg="#16213e", pady=8)
+        header.pack(fill="x")
+        
+        tk.Label(
+            header,
+            text=f"⬛  OmniSense CCTV  —  {room_name}",
+            font=("Segoe UI", 12, "bold"),
+            fg="#e2e8f0", bg="#16213e"
+        ).pack(side="left", padx=15)
+        
+        self.status_dot = tk.Label(
+            header, text="◉  Connecting…",
+            font=("Segoe UI", 10), fg="#f6c90e", bg="#16213e"
+        )
+        self.status_dot.pack(side="right", padx=15)
+        
+        # ── Video canvas ─────────────────────────────────────────────────
+        self.canvas = tk.Canvas(self, bg="#0d0d1a", highlightthickness=0)
+        self.canvas.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        self._canvas_img_id = None
+        self._draw_placeholder()
+        
+        # ── Footer bar ───────────────────────────────────────────────────
+        footer = tk.Frame(self, bg="#16213e", pady=6)
+        footer.pack(fill="x")
+        
+        tk.Label(
+            footer,
+            text=f"📡  Stream:  {self.stream_url}",
+            font=("Segoe UI", 9), fg="#94a3b8", bg="#16213e"
+        ).pack(side="left", padx=15)
+        
+        tk.Button(
+            footer, text="✖  Close",
+            font=("Segoe UI", 9, "bold"),
+            bg="#e53e3e", fg="white", activebackground="#c53030",
+            relief="flat", padx=12, pady=3,
+            command=self.close_viewer
+        ).pack(side="right", padx=10)
+        
+        # ── State ────────────────────────────────────────────────────────
+        self._running = True
+        self._current_photo = None   # keep reference to avoid GC
+        
+        # ── Start independent fetch thread ───────────────────────────────
+        self._thread = threading.Thread(target=self._stream_worker, daemon=True)
+        self._thread.start()
+        
+        # ── Poll for new frames on the Tk main thread ────────────────────
+        self._pending_frame = None
+        self._pending_lock = threading.Lock()
+        self._schedule_ui_update()
+        
+        self.protocol("WM_DELETE_WINDOW", self.close_viewer)
+    
+    # ── Helpers ─────────────────────────────────────────────────────────────
+    
+    def _draw_placeholder(self):
+        """Draws a dark placeholder before the first frame arrives."""
+        self.canvas.update_idletasks()
+        w = self.canvas.winfo_width() or 680
+        h = self.canvas.winfo_height() or 460
+        self.canvas.delete("placeholder")
+        self.canvas.create_rectangle(0, 0, w, h, fill="#0d0d1a", tags="placeholder")
+        self.canvas.create_text(
+            w // 2, h // 2,
+            text="⏳  Awaiting video stream…",
+            fill="#4a5568", font=("Segoe UI", 14), tags="placeholder"
+        )
+    
+    def _set_status(self, text: str, color: str):
+        """Thread-safe status label update."""
+        try:
+            self.after(0, lambda: self.status_dot.config(text=text, fg=color))
+        except tk.TclError:
+            pass
+    
+    # ── Background stream thread ─────────────────────────────────────────────
+    
+    def _stream_worker(self):
+        """Fetches MJPEG frames in a dedicated thread. Totally separate
+        from the AI-pipeline queues — camera sees two client connections."""
+        import urllib.error
+        
+        while self._running:
+            try:
+                self._set_status("◉  Connecting…", "#f6c90e")
+                req = urllib.request.urlopen(self.stream_url, timeout=8)
+                self._set_status("◉  LIVE", "#48bb78")
+                buf = b""
+                
+                while self._running:
+                    chunk = req.read(8192)
+                    if not chunk:
+                        break
+                    buf += chunk
+                    if len(buf) > 2_097_152:   # 2 MB safety cap
+                        buf = b""
+                        continue
+                    
+                    parts = buf.split(b"--frame")
+                    if len(parts) > 1:
+                        last_valid = None
+                        for part in parts[:-1]:
+                            soi = part.find(b'\xff\xd8')
+                            eoi = part.rfind(b'\xff\xd9')
+                            if soi != -1 and eoi != -1 and eoi > soi:
+                                last_valid = part[soi:eoi+2]
+                        if last_valid is not None:
+                            frame = cv2.imdecode(
+                                np.frombuffer(last_valid, dtype=np.uint8),
+                                cv2.IMREAD_COLOR
+                            )
+                            if frame is not None:
+                                with self._pending_lock:
+                                    self._pending_frame = frame
+                        buf = parts[-1]
+                        
+            except (urllib.error.URLError, OSError, Exception):
+                self._set_status("◉  Connection Lost — Retrying…", "#fc8181")
+                if self._running:
+                    time.sleep(3.0)
+    
+    # ── Tk-thread frame renderer ─────────────────────────────────────────────
+    
+    def _schedule_ui_update(self):
+        if not self._running:
+            return
+        
+        with self._pending_lock:
+            frame = self._pending_frame
+            self._pending_frame = None
+        
+        if frame is not None:
+            try:
+                # Remove placeholder once real frames arrive
+                self.canvas.delete("placeholder")
+                
+                canvas_w = self.canvas.winfo_width()
+                canvas_h = self.canvas.winfo_height()
+                
+                if canvas_w < 10 or canvas_h < 10:
+                    canvas_w, canvas_h = 660, 460
+                
+                # Letterbox-scale the frame into the canvas
+                fh, fw = frame.shape[:2]
+                scale = min(canvas_w / fw, canvas_h / fh)
+                new_w, new_h = int(fw * scale), int(fh * scale)
+                resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+                
+                rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+                img = Image.fromarray(rgb)
+                photo = ImageTk.PhotoImage(image=img)
+                
+                x_offset = (canvas_w - new_w) // 2
+                y_offset = (canvas_h - new_h) // 2
+                
+                if self._canvas_img_id is None:
+                    self._canvas_img_id = self.canvas.create_image(
+                        x_offset, y_offset, anchor="nw", image=photo
+                    )
+                else:
+                    self.canvas.coords(self._canvas_img_id, x_offset, y_offset)
+                    self.canvas.itemconfig(self._canvas_img_id, image=photo)
+                
+                self._current_photo = photo   # prevent garbage collection
+            except (tk.TclError, cv2.error):
+                pass
+        
+        try:
+            self.after(33, self._schedule_ui_update)   # ~30 fps render loop
+        except tk.TclError:
+            pass
+    
+    # ── Cleanup ──────────────────────────────────────────────────────────────
+    
+    def close_viewer(self):
+        self._running = False
+        self.destroy()
+
+
 # ─── ENTERPRISE MANAGEMENT GUI ────────────────────────────────────────────────
 class OmniSenseGUI(tk.Tk):
     def __init__(self):
@@ -311,6 +512,25 @@ class OmniSenseGUI(tk.Tk):
         dash_frame = ttk.LabelFrame(self, text="Active Fleet Status Dashboard", padding=15)
         dash_frame.pack(fill="both", expand=True, pady=5)
         
+        # ── Toolbar inside the dashboard frame ──────────────────────────
+        table_toolbar = ttk.Frame(dash_frame)
+        table_toolbar.pack(fill="x", pady=(0, 6))
+        
+        self.view_cam_btn = ttk.Button(
+            table_toolbar,
+            text="📷  View Camera",
+            command=self.open_camera_viewer
+        )
+        self.view_cam_btn.pack(side="left")
+        
+        ttk.Label(
+            table_toolbar,
+            text="  Double-click a room row to view its live feed",
+            font=("Segoe UI", 8),
+            foreground="gray"
+        ).pack(side="left", padx=6)
+        
+        # ── Dashboard table ─────────────────────────────────────────────
         columns = ("room", "ip", "status", "occupancy")
         self.tree = ttk.Treeview(dash_frame, columns=columns, show="headings", height=5)
         self.tree.heading("room", text="Monitored Location")
@@ -323,6 +543,9 @@ class OmniSenseGUI(tk.Tk):
         self.tree.column("status", anchor="center", width=150)
         self.tree.column("occupancy", anchor="center", width=120)
         self.tree.pack(fill="both", expand=True, pady=5)
+        
+        # Double-click anywhere on a row opens the camera viewer
+        self.tree.bind("<Double-1>", lambda event: self.open_camera_viewer())
         
         # System Management Controls
         control_frame = ttk.Frame(self)
@@ -369,6 +592,32 @@ class OmniSenseGUI(tk.Tk):
         save_config(config)
         self.refresh_ui_table_structure()
         self.room_ent.delete(0, tk.END); self.ip_ent.delete(0, tk.END); self.node_ent.delete(0, tk.END)
+
+    def open_camera_viewer(self):
+        """Opens a CCTV popup window for the selected room."""
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showinfo(
+                "No Room Selected",
+                "Please select a room from the table first, then click View Camera."
+            )
+            return
+        
+        room_id = selected[0]
+        fleet = config.get("CLASSROOM_FLEET", {})
+        
+        if room_id not in fleet:
+            messagebox.showerror("Room Not Found", f"Room '{room_id}' is not in the fleet config.")
+            return
+        
+        camera_ip = fleet[room_id].get("CAMERA_IP", "")
+        if not camera_ip:
+            messagebox.showerror("No Camera IP", f"Room '{room_id}' has no Camera IP configured.")
+            return
+        
+        # Open the live viewer popup
+        viewer = CameraViewerWindow(self, room_id, camera_ip)
+        viewer.focus_set()
 
     def remove_fleet_item(self):
         if not _stop.is_set(): return
