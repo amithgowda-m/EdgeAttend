@@ -2,10 +2,10 @@
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include "esp_http_server.h"
+#include <WiFiUdp.h>
 
 const char* ssid = "YOUR_WIFI_SSID";
 const char* password = "YOUR_WIFI_PASSWORD";
-
 
 const char* mqtt_broker = "www.mqtt-dashboard.com"; 
 const uint16_t mqtt_port = 1883;
@@ -31,6 +31,8 @@ WiFiClient espClient;
 PubSubClient mqtt(espClient);
 httpd_handle_t camera_httpd = NULL;
 
+WiFiUDP udp;
+unsigned long lastBeaconTimer = 0;
 unsigned long lastMqttHeartbeat = 0;
 
 #define PART_BOUNDARY "frame"
@@ -79,12 +81,9 @@ esp_err_t stream_handler(httpd_req_t *req) {
     }
     
     if(res != ESP_OK){ break; }
-    
-
   }
   return res;
 }
-
 
 esp_err_t snap_handler(httpd_req_t *req) {
   camera_fb_t * fb = esp_camera_fb_get();
@@ -104,7 +103,6 @@ esp_err_t snap_handler(httpd_req_t *req) {
   return res;
 }
 
-
 void startCameraServer(){
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.server_port = 80;
@@ -119,7 +117,6 @@ void startCameraServer(){
   }
 }
 
-
 void connectMQTT() {
   while (!mqtt.connected()) {
     Serial.print("[MQTT] Attempting connection to HiveMQ...");
@@ -128,7 +125,7 @@ void connectMQTT() {
     
     if (mqtt.connect(clientId.c_str())) {
       Serial.println(" Connected!");
-      mqtt.publish("omnisense/status", "{\"device\":\"esp32-cam\", \"status\":\"online\", \"version\":\"3.2\"}");
+      mqtt.publish("omnisense/status", "{\"device\":\"esp32-cam\", \"status\":\"online\", \"version\":\"4.0\"}");
     } else {
       Serial.print(" failed, rc=");
       Serial.print(mqtt.state());
@@ -138,11 +135,10 @@ void connectMQTT() {
   }
 }
 
-
 void setup() {
   Serial.begin(115200);
   delay(1000);
-  Serial.println("\n=== Booting OmniSense Edge Node v3.2 ===");
+  Serial.println("\n=== Booting OmniSense Edge Node v4.0 ===");
 
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
@@ -168,7 +164,6 @@ void setup() {
   
   if(psramFound()){
     config.frame_size = FRAMESIZE_VGA;  
-
     config.jpeg_quality = 10; 
     config.fb_count = 2;
   } else {
@@ -183,8 +178,6 @@ void setup() {
   }
 
   WiFi.begin(ssid, password);
-  
-
   WiFi.setSleep(false); 
 
   while (WiFi.status() != WL_CONNECTED) {
@@ -196,10 +189,6 @@ void setup() {
   Serial.print("Stream URL   : http://");
   Serial.print(WiFi.localIP());
   Serial.println("/");
-  
-  Serial.print("Snapshot URL : http://");
-  Serial.print(WiFi.localIP());
-  Serial.println("/snap");
 
   startCameraServer();
   mqtt.setServer(mqtt_broker, mqtt_port);
@@ -208,6 +197,17 @@ void setup() {
 void loop() {
   if (!mqtt.connected()) connectMQTT();
   mqtt.loop();
+
+  // --- OMNISENSE AUTO-DISCOVERY UDP BEACON ---
+  // Broadcasts IP to the network every 5 seconds.
+  // Ensure "ROOM 1" matches the Room Name exactly in your Python GUI!
+  if (millis() - lastBeaconTimer > 5000) {
+    udp.beginPacket("255.255.255.255", 9999); 
+    String beaconMsg = "OMNICAM:ROOM 1:" + WiFi.localIP().toString();
+    udp.print(beaconMsg);
+    udp.endPacket();
+    lastBeaconTimer = millis();
+  }
 
   if (millis() - lastMqttHeartbeat > 10000) {
     mqtt.publish("omnisense/health", "{\"device\": \"esp32-cam\", \"status\": \"active\"}");
