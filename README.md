@@ -17,8 +17,7 @@ A centralized management console built with Python and Tkinter. It acts as the b
 An ESP32-based microcontroller placed at the entrance of a room.
 - **ToF Occupancy Tracking**: Uses a SparkFun VL53L1X Time-of-Flight sensor to accurately track people entering and exiting the room via bi-directional laser zones, maintaining a highly accurate occupancy count.
 - **Automated Relay Control**: Automatically toggles a relay (e.g., room lights or HVAC) based on the occupancy count (turns off when empty).
-- **Alert System**: Features a buzzer that can be triggered remotely by the gateway (e.g., when an unauthorized person is detected).
-- **Local Display**: Houses an I2C 16x2 LCD to display current system status, IP address, and occupancy.
+- **Access Acknowledgment**: Features a buzzer that is triggered remotely by the gateway to provide a short audible beep when an authorized (known) person is recognized. Unauthorized (unknown) persons are logged silently without triggering an alarm.
 - **RESTful API**: Hosts local endpoints like `/status` (returns live occupancy JSON) and `/ring` (triggers the buzzer).
 
 ### 3. Camera Node (`server_ip.ino`)

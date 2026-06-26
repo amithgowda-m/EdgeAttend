@@ -3,20 +3,19 @@
 #include <ESPmDNS.h>
 #include <Wire.h>
 #include "SparkFun_VL53L1X.h" 
-#include <LiquidCrystal_I2C.h> 
+
 
 const char* ssid = "YOUR_WIFI_SSID";
 const char* password = "YOUR_WIFI_PASSWORD";
 
 #define BUZZER_PIN 12 
 #define RELAY_PIN 26 
-#define SDA_PIN 21
-#define SCL_PIN 22
+#define RELAY_PIN 26 
 
 WiFiClient espClient;
 WebServer server(80); 
 SFEVL53L1X distanceSensor;
-LiquidCrystal_I2C lcd(0x27, 16, 2);
+SFEVL53L1X distanceSensor;
 
 
 unsigned long buzzerTimer = 0;
@@ -32,14 +31,6 @@ int center2 = 231;
 int currentZone = 1;
 int pathState = 0; 
 
-void updateLCD(String topMessage = "OmniSense Active") {
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print(topMessage);
-  lcd.setCursor(0, 1);
-  lcd.print("Occupancy: ");
-  lcd.print(occupancyCount);
-}
 
 void setup_wifi() {
   delay(10);
@@ -70,7 +61,6 @@ void handleRing() {
     
     if (faceStatus == "known") {
       Serial.println("API Trigger: Known Face. Ringing buzzer!");
-      updateLCD("Access Granted!"); 
       buzzerDuration = 1000; 
       isBuzzerActive = true;
       buzzerTimer = millis();
@@ -79,10 +69,8 @@ void handleRing() {
     } 
     else if (faceStatus == "unknown") {
       Serial.println("API Trigger: Unknown Face. Silent Alert!");
-      updateLCD("Alert: Unknown!"); 
-      
       // Removed the 5-second buzzer logic here.
-      // The screen will update, but it will remain completely silent.
+      // It will remain completely silent.
       
       server.send(200, "text/plain", "Success: Unknown face logged silently");
     }
@@ -135,7 +123,6 @@ void processToF() {
     if (countChanged) {
       Serial.print("New Occupancy: ");
       Serial.println(occupancyCount);
-      updateLCD(); 
       
       if (occupancyCount > 0) {
         digitalWrite(RELAY_PIN, HIGH);
@@ -151,17 +138,12 @@ void processToF() {
 
 void setup() {
   Serial.begin(115200);
-  Wire.begin(SDA_PIN, SCL_PIN);
   
   pinMode(BUZZER_PIN, OUTPUT);
   pinMode(RELAY_PIN, OUTPUT);
   digitalWrite(BUZZER_PIN, LOW);
   digitalWrite(RELAY_PIN, LOW);
 
-  lcd.init();
-  lcd.backlight();
-  lcd.setCursor(0, 0);
-  lcd.print("Booting...");
 
   setup_wifi();
 
@@ -172,8 +154,6 @@ void setup() {
 
   if (distanceSensor.begin() != 0) {
     Serial.println("VL53L1X Sensor failed!");
-    lcd.clear();
-    lcd.print("ToF Sensor Error");
   } else {
     distanceSensor.setDistanceModeShort(); 
     distanceSensor.setTimingBudgetInMs(20); 
@@ -182,7 +162,6 @@ void setup() {
     distanceSensor.startRanging(); // Kick off the first range
   }
 
-  updateLCD();
 }
 
 void loop() {
@@ -197,6 +176,5 @@ void loop() {
     digitalWrite(BUZZER_PIN, LOW);
     isBuzzerActive = false;
     Serial.println("Buzzer turned OFF.");
-    updateLCD(); 
   }
 }
